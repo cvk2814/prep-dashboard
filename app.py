@@ -3,7 +3,6 @@ import re
 from datetime import date, timedelta
 
 import pandas as pd
-import plotly.express as px
 import requests
 import streamlit as st
 from dotenv import load_dotenv
@@ -158,6 +157,25 @@ def categoria_picker(fornecedores: pd.DataFrame, key_prefix: str, categoria_atua
     return escolha
 
 
+@st.dialog("Detalhe do veículo")
+def dialog_detalhe_veiculo(veiculos: pd.DataFrame, placa: str, total: float):
+    st.markdown(f"### 🚗 {placa}")
+    st.metric("Gasto total", f"R$ {total:,.2f}")
+    st.write("")
+    detalhe = (
+        veiculos[veiculos["placa"] == placa]
+        .groupby("categoria", as_index=False)["valor"].sum()
+        .sort_values("valor", ascending=False)
+    )
+    for _, d in detalhe.iterrows():
+        c1, c2 = st.columns([3, 2])
+        c1.write(d["categoria"])
+        c2.write(f"R$ {d['valor']:,.2f}")
+    st.write("")
+    if st.button("Fechar", use_container_width=True):
+        st.rerun()
+
+
 @st.dialog("Novo fornecedor")
 def dialog_novo_fornecedor(fornecedores: pd.DataFrame):
     st.caption("Preencha os dados do fornecedor. É rápido!")
@@ -272,13 +290,13 @@ with tab_dashboard:
             df["semana"] = df["created_at"].dt.to_period("W").apply(lambda p: p.start_time.date())
 
             st.subheader("Onde o dinheiro está indo")
-            por_categoria_total = df.groupby("categoria", as_index=False)["valor"].sum().sort_values("valor")
-            fig = px.bar(
-                por_categoria_total, x="valor", y="categoria", orientation="h",
-                labels={"valor": "R$ gasto no período", "categoria": ""}, text_auto=".2s",
-            )
-            fig.update_layout(showlegend=False, yaxis_title=None)
-            st.plotly_chart(fig, use_container_width=True)
+            por_categoria_total = df.groupby("categoria", as_index=False)["valor"].sum().sort_values("valor", ascending=False)
+            maior_valor = por_categoria_total["valor"].max()
+            for _, cat in por_categoria_total.iterrows():
+                c_nome, c_barra, c_valor = st.columns([2, 3, 2])
+                c_nome.write(cat["categoria"])
+                c_barra.progress(cat["valor"] / maior_valor if maior_valor else 0)
+                c_valor.write(f"R$ {cat['valor']:,.2f}")
 
             st.subheader("Resumo por categoria")
             resumo = (
@@ -349,12 +367,11 @@ with tab_veiculos:
 
             for _, v in resumo_veiculos.iterrows():
                 with st.container(border=True):
-                    c1, c2 = st.columns([3, 1])
+                    c1, c2, c3 = st.columns([3, 2, 1])
                     c1.markdown(f"**🚗 {v['placa']}**")
-                    c2.metric("Gasto total", f"R$ {v['valor']:,.2f}", label_visibility="collapsed")
-                    detalhe = veiculos[veiculos["placa"] == v["placa"]].groupby("categoria", as_index=False)["valor"].sum().sort_values("valor", ascending=False)
-                    linha = "  •  ".join(f"{d['categoria']}: R$ {d['valor']:,.2f}" for _, d in detalhe.iterrows())
-                    c1.caption(linha)
+                    c2.markdown(f"**R$ {v['valor']:,.2f}**")
+                    if c3.button("Ver", key=f"ver_{v['placa']}", use_container_width=True):
+                        dialog_detalhe_veiculo(veiculos, v["placa"], v["valor"])
 
 with tab_fornecedores:
     col_titulo, col_busca, col_novo = st.columns([2, 3, 2])
