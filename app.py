@@ -125,12 +125,69 @@ def prep_update_fornecedor(row_id: str, categoria: str, ativo: bool):
     resp.raise_for_status()
 
 
-st.set_page_config(page_title="Preparação — Custos", layout="wide")
-st.title("Preparação e Pós-Venda — Custos")
+def categoria_picker(fornecedores: pd.DataFrame, key_prefix: str, categoria_atual: str | None = None) -> str:
+    opcoes = categoria_options(fornecedores)
+    index = opcoes.index(categoria_atual) if categoria_atual in opcoes else 0
+    escolha = st.selectbox("Categoria", opcoes, index=index, key=f"{key_prefix}_categoria")
+    if escolha == NOVA_CATEGORIA:
+        return st.text_input("Nome da nova categoria", key=f"{key_prefix}_nova_categoria").strip()
+    return escolha
 
-tab_dashboard, tab_fornecedores = st.tabs(["📊 Dashboard", "🏷️ Fornecedores"])
 
-with st.spinner("Carregando dados do hub..."):
+@st.dialog("Novo fornecedor")
+def dialog_novo_fornecedor(fornecedores: pd.DataFrame):
+    st.caption("Preencha os dados do fornecedor. É rápido!")
+    nome = st.text_input("Nome do fornecedor", key="novo_nome", placeholder="Ex: Jm Funilaria e Pintura")
+    cnpj = st.text_input("CNPJ ou CPF", key="novo_cnpj", placeholder="Só números ou com pontuação, tanto faz")
+    categoria = categoria_picker(fornecedores, "novo")
+
+    st.write("")
+    col1, col2 = st.columns(2)
+    if col1.button("✅ Cadastrar", type="primary", use_container_width=True):
+        if not nome or not cnpj or not categoria:
+            st.error("Preencha todos os campos.")
+        else:
+            try:
+                prep_insert_fornecedor(normalize_doc(cnpj), nome, categoria)
+                st.cache_data.clear()
+                st.success(f"{nome} cadastrado!")
+                st.rerun()
+            except requests.HTTPError as e:
+                if "duplicate key" in e.response.text:
+                    st.error("Já existe um fornecedor cadastrado com esse CNPJ/CPF.")
+                else:
+                    st.error(f"Erro ao cadastrar: {e.response.text}")
+    if col2.button("Cancelar", use_container_width=True):
+        st.rerun()
+
+
+@st.dialog("Editar fornecedor")
+def dialog_editar_fornecedor(fornecedores: pd.DataFrame, row: pd.Series):
+    st.markdown(f"**{row['nome']}**")
+    st.caption(row["cnpj_cpf"])
+    categoria = categoria_picker(fornecedores, f"edit_{row['id']}", categoria_atual=row["categoria"])
+    ativo = st.toggle("Fornecedor ativo", value=bool(row["ativo"]), key=f"edit_{row['id']}_ativo",
+                       help="Desative se esse fornecedor não é mais usado. Ele some da lista de classificação, mas o histórico continua.")
+
+    st.write("")
+    col1, col2 = st.columns(2)
+    if col1.button("💾 Salvar", type="primary", use_container_width=True):
+        if not categoria:
+            st.error("Escolha ou digite uma categoria.")
+        else:
+            prep_update_fornecedor(row["id"], categoria, ativo)
+            st.cache_data.clear()
+            st.rerun()
+    if col2.button("Cancelar", use_container_width=True):
+        st.rerun()
+
+
+st.set_page_config(page_title="Preparação — Custos", layout="wide", page_icon="🔧")
+st.title("🔧 Preparação e Pós-Venda — Custos")
+
+tab_dashboard, tab_fornecedores = st.tabs(["📊 Painel de custos", "🏷️ Fornecedores"])
+
+with st.spinner("Carregando dados..."):
     solicitacoes = hub_fetch_solicitacoes()
     fornecedores = prep_fetch_fornecedores()
 
@@ -206,74 +263,64 @@ with tab_dashboard:
             resumo["ultima_semana"] = resumo["categoria"].map(ultima).fillna(0)
             resumo["limite_alerta"] = resumo["media_semanal"] + resumo["desvio"].fillna(0)
             resumo["acima_do_normal"] = resumo["ultima_semana"] > resumo["limite_alerta"]
-            resumo_display = resumo[["categoria", "total", "media_semanal", "ultima_semana", "acima_do_normal"]]
-            resumo_display = resumo_display.rename(columns={
-                "categoria": "Categoria", "total": "Total no período (R$)",
-                "media_semanal": "Média semanal (R$)", "ultima_semana": "Última semana (R$)",
-                "acima_do_normal": "Acima do normal?",
-            })
-            st.dataframe(resumo_display.style.format({
-                "Total no período (R$)": "R$ {:,.2f}",
-                "Média semanal (R$)": "R$ {:,.2f}",
-                "Última semana (R$)": "R$ {:,.2f}",
-            }), use_container_width=True)
+            resumo = resumo.sort_values("total", ascending=False)
+
+            cols = st.columns(3)
+            for i, (_, cat) in enumerate(resumo.iterrows()):
+                with cols[i % 3]:
+                    with st.container(border=True):
+                        titulo = cat["categoria"]
+                        if cat["acima_do_normal"]:
+                            titulo += " ⚠️"
+                        st.markdown(f"**{titulo}**")
+                        st.metric("Total no período", f"R$ {cat['total']:,.2f}")
+                        st.caption(f"Média semanal: R$ {cat['media_semanal']:,.2f}")
+                        if cat["acima_do_normal"]:
+                            st.caption("🔺 Última semana acima do normal")
 
             if total_nao_class > 0:
-                with st.expander(f"⚠️ {len(nao_class)} pedidos ainda não classificados (R$ {total_nao_class:,.2f}) — cadastre o fornecedor na aba ao lado"):
+                with st.expander(f"⚠️ {len(nao_class)} pedidos ainda não classificados (R$ {total_nao_class:,.2f}) — cadastre o fornecedor na aba 🏷️ Fornecedores"):
                     pendentes = (
                         nao_class.groupby(["benef_nome", "benef_cpf_cnpj"], as_index=False)
                         .agg(qtd=("id", "count"), total=("valor", "sum"))
                         .sort_values("total", ascending=False)
                     )
-                    st.dataframe(pendentes, use_container_width=True)
+                    pendentes = pendentes.rename(columns={
+                        "benef_nome": "Fornecedor", "benef_cpf_cnpj": "CNPJ/CPF",
+                        "qtd": "Qtd. pedidos", "total": "Total (R$)",
+                    })
+                    st.dataframe(pendentes.style.format({"Total (R$)": "R$ {:,.2f}"}), use_container_width=True, hide_index=True)
 
 with tab_fornecedores:
-    st.subheader("Cadastrar novo fornecedor")
-    col1, col2, col3 = st.columns(3)
-    cnpj_input = col1.text_input("CNPJ/CPF (com ou sem pontuação)", key="cnpj_input")
-    nome_input = col2.text_input("Nome do fornecedor", key="nome_input")
-    categoria_choice = col3.selectbox("Categoria", categoria_options(fornecedores), key="categoria_choice")
-    if categoria_choice == NOVA_CATEGORIA:
-        categoria_input = st.text_input("Nome da nova categoria", key="nova_categoria_input")
-    else:
-        categoria_input = categoria_choice
+    col_titulo, col_busca, col_novo = st.columns([2, 3, 2])
+    col_titulo.subheader("Fornecedores")
+    busca = col_busca.text_input(
+        "Buscar", key="busca_fornecedor", placeholder="🔍 Buscar por nome...", label_visibility="collapsed"
+    )
+    if col_novo.button("➕ Novo fornecedor", type="primary", use_container_width=True):
+        dialog_novo_fornecedor(fornecedores)
 
-    if st.button("Cadastrar"):
-        if not cnpj_input or not nome_input or not categoria_input:
-            st.error("Preencha CNPJ/CPF, nome e categoria.")
-        else:
-            try:
-                prep_insert_fornecedor(normalize_doc(cnpj_input), nome_input, categoria_input)
-                st.success(f"{nome_input} cadastrado como {categoria_input}.")
-                for k in ["cnpj_input", "nome_input", "categoria_choice", "nova_categoria_input"]:
-                    st.session_state.pop(k, None)
-                st.cache_data.clear()
-                st.rerun()
-            except requests.HTTPError as e:
-                st.error(f"Erro ao cadastrar: {e.response.text}")
+    st.write("")
 
-    st.subheader("Fornecedores cadastrados")
     if fornecedores.empty:
-        st.info("Nenhum fornecedor cadastrado ainda.")
+        st.info("Nenhum fornecedor cadastrado ainda. Clique em **➕ Novo fornecedor** para começar.")
     else:
-        edited = st.data_editor(
-            fornecedores[["id", "nome", "cnpj_cpf", "categoria", "ativo"]],
-            column_config={
-                "id": None,
-                "categoria": st.column_config.SelectboxColumn(
-                    "categoria", options=[c for c in categoria_options(fornecedores) if c != NOVA_CATEGORIA]
-                ),
-            },
-            disabled=["nome", "cnpj_cpf"],
-            hide_index=True,
-            use_container_width=True,
-            key="fornecedores_editor",
-        )
-        if st.button("Salvar alterações"):
-            changed = edited.merge(fornecedores[["id", "categoria", "ativo"]], on="id", suffixes=("", "_old"))
-            changed = changed[(changed["categoria"] != changed["categoria_old"]) | (changed["ativo"] != changed["ativo_old"])]
-            for _, row in changed.iterrows():
-                prep_update_fornecedor(row["id"], row["categoria"], row["ativo"])
-            st.success(f"{len(changed)} fornecedor(es) atualizado(s).")
-            st.cache_data.clear()
-            st.rerun()
+        lista = fornecedores.sort_values("nome")
+        if busca:
+            lista = lista[lista["nome"].str.contains(busca, case=False, na=False)]
+
+        if lista.empty:
+            st.warning(f"Nenhum fornecedor encontrado para '{busca}'.")
+
+        for _, row in lista.iterrows():
+            with st.container(border=True):
+                c_nome, c_categoria, c_status, c_acao = st.columns([3, 2, 1, 1])
+                c_nome.markdown(f"**{row['nome']}**")
+                c_nome.caption(row["cnpj_cpf"])
+                c_categoria.markdown(f"🏷️ {row['categoria']}")
+                if row["ativo"]:
+                    c_status.markdown(":green[Ativo]")
+                else:
+                    c_status.markdown(":gray[Inativo]")
+                if c_acao.button("Editar", key=f"editar_{row['id']}", use_container_width=True):
+                    dialog_editar_fornecedor(fornecedores, row)
