@@ -59,7 +59,7 @@ def hub_fetch_solicitacoes() -> pd.DataFrame:
     rows = []
     offset = 0
     page_size = 1000
-    cols = "id,empresa,tipo,status,valor,placa,benef_nome,benef_cpf_cnpj,descricao,created_at"
+    cols = "id,empresa,tipo,status,valor,placa,benef_nome,benef_cpf_cnpj,descricao,created_at,lote"
     while True:
         resp = requests.get(
             f"{HUB_URL}/rest/v1/solicitacoes",
@@ -85,6 +85,30 @@ def hub_fetch_solicitacoes() -> pd.DataFrame:
     df["created_at"] = pd.to_datetime(df["created_at"])
     df["cnpj_norm"] = df["benef_cpf_cnpj"].apply(normalize_doc)
     return df
+
+
+def gasto_por_veiculo(df: pd.DataFrame) -> pd.DataFrame:
+    linhas = []
+    for _, row in df.iterrows():
+        itens = row.get("lote")
+        if isinstance(itens, list) and itens:
+            for item in itens:
+                linhas.append({
+                    "placa": (item.get("placa") or "").strip().upper() or "Sem placa",
+                    "valor": item.get("valor") or 0,
+                    "categoria": row["categoria"],
+                    "empresa": row["empresa"],
+                    "created_at": row["created_at"],
+                })
+        else:
+            linhas.append({
+                "placa": (row["placa"] or "").strip().upper() if row["placa"] else "Sem placa",
+                "valor": row["valor"],
+                "categoria": row["categoria"],
+                "empresa": row["empresa"],
+                "created_at": row["created_at"],
+            })
+    return pd.DataFrame(linhas)
 
 
 def prep_fetch_fornecedores() -> pd.DataFrame:
@@ -185,7 +209,7 @@ def dialog_editar_fornecedor(fornecedores: pd.DataFrame, row: pd.Series):
 st.set_page_config(page_title="Preparação — Custos", layout="wide", page_icon="🔧")
 st.title("🔧 Preparação e Pós-Venda — Custos")
 
-tab_dashboard, tab_fornecedores = st.tabs(["📊 Painel de custos", "🏷️ Fornecedores"])
+tab_dashboard, tab_veiculos, tab_fornecedores = st.tabs(["📊 Painel de custos", "🚗 Por veículo", "🏷️ Fornecedores"])
 
 with st.spinner("Carregando dados..."):
     solicitacoes = hub_fetch_solicitacoes()
@@ -200,36 +224,38 @@ else:
 if not solicitacoes.empty:
     solicitacoes["categoria"] = solicitacoes["cnpj_norm"].map(cat_map).fillna(NAO_CLASSIFICADO)
 
+    st.sidebar.header("Filtros")
+    empresas = sorted(solicitacoes["empresa"].dropna().unique().tolist())
+    empresa_sel = st.sidebar.multiselect("Empresa", empresas, default=empresas)
+
+    status_opts = sorted(solicitacoes["status"].dropna().unique().tolist())
+    default_status = [s for s in status_opts if s == "PAGO"] or status_opts
+    status_sel = st.sidebar.multiselect("Status", status_opts, default=default_status)
+
+    min_date = solicitacoes["created_at"].min().date()
+    max_date = solicitacoes["created_at"].max().date()
+    date_range = st.sidebar.date_input(
+        "Período", value=(max(min_date, max_date - timedelta(weeks=12)), max_date),
+        min_value=min_date, max_value=max_date,
+    )
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_date, end_date = date_range
+    else:
+        start_date, end_date = min_date, max_date
+
+    df = solicitacoes[
+        solicitacoes["empresa"].isin(empresa_sel)
+        & solicitacoes["status"].isin(status_sel)
+        & (solicitacoes["created_at"].dt.date >= start_date)
+        & (solicitacoes["created_at"].dt.date <= end_date)
+    ].copy()
+else:
+    df = solicitacoes
+
 with tab_dashboard:
     if solicitacoes.empty:
         st.info("Nenhum registro de MANUTENCAO/POS_VENDAS encontrado no hub.")
     else:
-        st.sidebar.header("Filtros")
-        empresas = sorted(solicitacoes["empresa"].dropna().unique().tolist())
-        empresa_sel = st.sidebar.multiselect("Empresa", empresas, default=empresas)
-
-        status_opts = sorted(solicitacoes["status"].dropna().unique().tolist())
-        default_status = [s for s in status_opts if s == "PAGO"] or status_opts
-        status_sel = st.sidebar.multiselect("Status", status_opts, default=default_status)
-
-        min_date = solicitacoes["created_at"].min().date()
-        max_date = solicitacoes["created_at"].max().date()
-        date_range = st.sidebar.date_input(
-            "Período", value=(max(min_date, max_date - timedelta(weeks=12)), max_date),
-            min_value=min_date, max_value=max_date,
-        )
-        if isinstance(date_range, tuple) and len(date_range) == 2:
-            start_date, end_date = date_range
-        else:
-            start_date, end_date = min_date, max_date
-
-        df = solicitacoes[
-            solicitacoes["empresa"].isin(empresa_sel)
-            & solicitacoes["status"].isin(status_sel)
-            & (solicitacoes["created_at"].dt.date >= start_date)
-            & (solicitacoes["created_at"].dt.date <= end_date)
-        ].copy()
-
         if df.empty:
             st.warning("Nenhum registro para os filtros selecionados.")
         else:
@@ -245,11 +271,13 @@ with tab_dashboard:
 
             df["semana"] = df["created_at"].dt.to_period("W").apply(lambda p: p.start_time.date())
 
-            semanal = df.groupby(["semana", "categoria"], as_index=False)["valor"].sum()
+            st.subheader("Onde o dinheiro está indo")
+            por_categoria_total = df.groupby("categoria", as_index=False)["valor"].sum().sort_values("valor")
             fig = px.bar(
-                semanal, x="semana", y="valor", color="categoria",
-                title="Gasto semanal por categoria", labels={"valor": "R$", "semana": "Semana"},
+                por_categoria_total, x="valor", y="categoria", orientation="h",
+                labels={"valor": "R$ gasto no período", "categoria": ""}, text_auto=".2s",
             )
+            fig.update_layout(showlegend=False, yaxis_title=None)
             st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("Resumo por categoria")
@@ -290,6 +318,43 @@ with tab_dashboard:
                         "qtd": "Qtd. pedidos", "total": "Total (R$)",
                     })
                     st.dataframe(pendentes.style.format({"Total (R$)": "R$ {:,.2f}"}), use_container_width=True, hide_index=True)
+
+with tab_veiculos:
+    if solicitacoes.empty or df.empty:
+        st.info("Nenhum registro para mostrar.")
+    else:
+        veiculos = gasto_por_veiculo(df)
+        placa_busca = st.text_input("🔍 Buscar placa", key="busca_placa", placeholder="Ex: ABC1D23")
+
+        resumo_veiculos = (
+            veiculos.groupby("placa", as_index=False)["valor"].sum().sort_values("valor", ascending=False)
+        )
+        if placa_busca:
+            resumo_veiculos = resumo_veiculos[resumo_veiculos["placa"].str.contains(placa_busca.upper(), na=False)]
+
+        if resumo_veiculos.empty:
+            st.warning("Nenhum veículo encontrado.")
+        else:
+            total_encontrados = len(resumo_veiculos)
+            LIMITE = 25
+            ver_todos = False
+            if placa_busca or total_encontrados <= LIMITE:
+                st.caption(f"{total_encontrados} veículo(s) — do mais caro para o mais barato")
+            else:
+                st.caption(f"Mostrando os {LIMITE} veículos com maior gasto (de {total_encontrados} no total). Use a busca para achar uma placa específica.")
+                ver_todos = st.checkbox(f"Mostrar todos os {total_encontrados}")
+
+            if not ver_todos and not placa_busca:
+                resumo_veiculos = resumo_veiculos.head(LIMITE)
+
+            for _, v in resumo_veiculos.iterrows():
+                with st.container(border=True):
+                    c1, c2 = st.columns([3, 1])
+                    c1.markdown(f"**🚗 {v['placa']}**")
+                    c2.metric("Gasto total", f"R$ {v['valor']:,.2f}", label_visibility="collapsed")
+                    detalhe = veiculos[veiculos["placa"] == v["placa"]].groupby("categoria", as_index=False)["valor"].sum().sort_values("valor", ascending=False)
+                    linha = "  •  ".join(f"{d['categoria']}: R$ {d['valor']:,.2f}" for _, d in detalhe.iterrows())
+                    c1.caption(linha)
 
 with tab_fornecedores:
     col_titulo, col_busca, col_novo = st.columns([2, 3, 2])
