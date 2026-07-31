@@ -23,7 +23,7 @@ HUB_KEY = _config("HUB_SUPABASE_KEY")
 PREP_URL = _config("PREP_SUPABASE_URL").rstrip("/")
 PREP_KEY = _config("PREP_SUPABASE_KEY")
 
-CATEGORIAS = [
+CATEGORIAS_PADRAO = [
     "Funilaria/Pintura",
     "Micropintura",
     "Martelinho de Ouro",
@@ -36,7 +36,13 @@ CATEGORIAS = [
     "Vidros",
     "Outros",
 ]
+NOVA_CATEGORIA = "+ Nova categoria..."
 NAO_CLASSIFICADO = "Não classificado"
+
+
+def categoria_options(fornecedores: pd.DataFrame) -> list:
+    existentes = set(fornecedores["categoria"].dropna()) if not fornecedores.empty else set()
+    return sorted(set(CATEGORIAS_PADRAO) | existentes) + [NOVA_CATEGORIA]
 
 
 def _headers(key: str) -> dict:
@@ -223,23 +229,28 @@ with tab_dashboard:
 
 with tab_fornecedores:
     st.subheader("Cadastrar novo fornecedor")
-    with st.form("novo_fornecedor", clear_on_submit=True):
-        col1, col2, col3 = st.columns(3)
-        cnpj_input = col1.text_input("CNPJ/CPF (com ou sem pontuação)")
-        nome_input = col2.text_input("Nome do fornecedor")
-        categoria_input = col3.selectbox("Categoria", CATEGORIAS)
-        submitted = st.form_submit_button("Cadastrar")
-        if submitted:
-            if not cnpj_input or not nome_input:
-                st.error("Preencha CNPJ/CPF e nome.")
-            else:
-                try:
-                    prep_insert_fornecedor(normalize_doc(cnpj_input), nome_input, categoria_input)
-                    st.success(f"{nome_input} cadastrado como {categoria_input}.")
-                    st.cache_data.clear()
-                    st.rerun()
-                except requests.HTTPError as e:
-                    st.error(f"Erro ao cadastrar: {e.response.text}")
+    col1, col2, col3 = st.columns(3)
+    cnpj_input = col1.text_input("CNPJ/CPF (com ou sem pontuação)", key="cnpj_input")
+    nome_input = col2.text_input("Nome do fornecedor", key="nome_input")
+    categoria_choice = col3.selectbox("Categoria", categoria_options(fornecedores), key="categoria_choice")
+    if categoria_choice == NOVA_CATEGORIA:
+        categoria_input = st.text_input("Nome da nova categoria", key="nova_categoria_input")
+    else:
+        categoria_input = categoria_choice
+
+    if st.button("Cadastrar"):
+        if not cnpj_input or not nome_input or not categoria_input:
+            st.error("Preencha CNPJ/CPF, nome e categoria.")
+        else:
+            try:
+                prep_insert_fornecedor(normalize_doc(cnpj_input), nome_input, categoria_input)
+                st.success(f"{nome_input} cadastrado como {categoria_input}.")
+                for k in ["cnpj_input", "nome_input", "categoria_choice", "nova_categoria_input"]:
+                    st.session_state.pop(k, None)
+                st.cache_data.clear()
+                st.rerun()
+            except requests.HTTPError as e:
+                st.error(f"Erro ao cadastrar: {e.response.text}")
 
     st.subheader("Fornecedores cadastrados")
     if fornecedores.empty:
@@ -249,7 +260,9 @@ with tab_fornecedores:
             fornecedores[["id", "nome", "cnpj_cpf", "categoria", "ativo"]],
             column_config={
                 "id": None,
-                "categoria": st.column_config.SelectboxColumn("categoria", options=CATEGORIAS),
+                "categoria": st.column_config.SelectboxColumn(
+                    "categoria", options=[c for c in categoria_options(fornecedores) if c != NOVA_CATEGORIA]
+                ),
             },
             disabled=["nome", "cnpj_cpf"],
             hide_index=True,
