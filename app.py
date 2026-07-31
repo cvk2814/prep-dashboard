@@ -157,6 +157,26 @@ def categoria_picker(fornecedores: pd.DataFrame, key_prefix: str, categoria_atua
     return escolha
 
 
+@st.dialog("Pagamentos")
+def dialog_pagamentos_categoria(df: pd.DataFrame, categoria: str):
+    pagamentos = df[df["categoria"] == categoria].sort_values("created_at", ascending=False)
+    st.markdown(f"### 🏷️ {categoria}")
+    st.caption(f"{len(pagamentos)} pagamento(s) — R$ {pagamentos['valor'].sum():,.2f} no total")
+    st.write("")
+    dia_atual = None
+    for _, p in pagamentos.iterrows():
+        dia = p["created_at"].strftime("%d/%m/%Y")
+        if dia != dia_atual:
+            st.markdown(f"**{dia}**")
+            dia_atual = dia
+        placa_txt = f" • placa {p['placa']}" if pd.notna(p.get("placa")) else ""
+        st.write(f"R$ {p['valor']:,.2f}{placa_txt}")
+        st.caption(p["benef_nome"])
+    st.write("")
+    if st.button("Fechar", use_container_width=True):
+        st.rerun()
+
+
 @st.dialog("Detalhe do veículo")
 def dialog_detalhe_veiculo(veiculos: pd.DataFrame, placa: str, total: float):
     st.markdown(f"### 🚗 {placa}")
@@ -323,6 +343,8 @@ with tab_dashboard:
                         st.caption(f"Média semanal: R$ {cat['media_semanal']:,.2f}")
                         if cat["acima_do_normal"]:
                             st.caption("🔺 Última semana acima do normal")
+                        if st.button("Ver pagamentos", key=f"ver_pagamentos_{cat['categoria']}", use_container_width=True):
+                            dialog_pagamentos_categoria(df, cat["categoria"])
 
             if total_nao_class > 0:
                 with st.expander(f"⚠️ {len(nao_class)} pedidos ainda não classificados (R$ {total_nao_class:,.2f}) — cadastre o fornecedor na aba 🏷️ Fornecedores"):
