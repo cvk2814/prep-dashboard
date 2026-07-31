@@ -25,7 +25,10 @@ PREP_KEY = _config("PREP_SUPABASE_KEY")
 
 CATEGORIAS = [
     "Funilaria/Pintura",
+    "Micropintura",
+    "Martelinho de Ouro",
     "Mecânica/Revisão",
+    "Peças",
     "Pneus",
     "Polimento/Estética",
     "Higienização/Limpeza",
