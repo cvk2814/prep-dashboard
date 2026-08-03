@@ -38,6 +38,15 @@ CATEGORIAS_PADRAO = [
 NOVA_CATEGORIA = "+ Nova categoria..."
 NAO_CLASSIFICADO = "Não classificado"
 
+MESES_PT = {
+    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
+    7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
+}
+
+
+def label_mes(periodo) -> str:
+    return f"{MESES_PT[periodo.month]}/{periodo.year}"
+
 
 def categoria_options(fornecedores: pd.DataFrame) -> list:
     existentes = set(fornecedores["categoria"].dropna()) if not fornecedores.empty else set()
@@ -148,6 +157,44 @@ def prep_update_fornecedor(row_id: str, categoria: str, ativo: bool):
     resp.raise_for_status()
 
 
+def prep_fetch_orcamentos() -> pd.DataFrame:
+    resp = requests.get(
+        f"{PREP_URL}/rest/v1/orcamentos_veiculo",
+        headers=_headers(PREP_KEY),
+        params={"select": "*", "order": "criado_em.desc"},
+        timeout=30,
+    )
+    if resp.status_code == 404:
+        return pd.DataFrame(columns=["id", "placa", "categoria", "valor", "observacao", "criado_em"])
+    resp.raise_for_status()
+    df = pd.DataFrame(resp.json())
+    if not df.empty:
+        df["placa"] = df["placa"].str.strip().str.upper()
+        df["criado_em"] = pd.to_datetime(df["criado_em"])
+    return df
+
+
+def prep_insert_orcamento(placa: str, categoria: str, valor: float, observacao: str):
+    resp = requests.post(
+        f"{PREP_URL}/rest/v1/orcamentos_veiculo",
+        headers={**_headers(PREP_KEY), "Content-Type": "application/json", "Prefer": "return=representation"},
+        json={"placa": placa.strip().upper(), "categoria": categoria, "valor": valor, "observacao": observacao or None},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def prep_delete_orcamento(row_id: str):
+    resp = requests.delete(
+        f"{PREP_URL}/rest/v1/orcamentos_veiculo",
+        headers=_headers(PREP_KEY),
+        params={"id": f"eq.{row_id}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+
 def categoria_picker(fornecedores: pd.DataFrame, key_prefix: str, categoria_atual: str | None = None) -> str:
     opcoes = categoria_options(fornecedores)
     index = opcoes.index(categoria_atual) if categoria_atual in opcoes else 0
@@ -178,21 +225,78 @@ def dialog_pagamentos_categoria(df: pd.DataFrame, categoria: str):
 
 
 @st.dialog("Detalhe do veículo")
-def dialog_detalhe_veiculo(veiculos: pd.DataFrame, placa: str, total: float):
+def dialog_detalhe_veiculo(veiculos: pd.DataFrame, fornecedores: pd.DataFrame, orcamentos: pd.DataFrame, placa: str, total: float):
     st.markdown(f"### 🚗 {placa}")
-    st.metric("Gasto total", f"R$ {total:,.2f}")
+
+    orc_placa = orcamentos[orcamentos["placa"] == placa] if not orcamentos.empty else orcamentos
+    total_orcado = orc_placa["valor"].sum() if not orc_placa.empty else 0.0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Gasto real", f"R$ {total:,.2f}")
+    c2.metric("Orçado", f"R$ {total_orcado:,.2f}")
+    if total_orcado > 0:
+        diferenca = total - total_orcado
+        c3.metric("Diferença", f"R$ {diferenca:,.2f}")
+        c3.caption("🔺 Acima do orçado" if diferenca > 0 else "✅ Dentro do orçado")
+    else:
+        c3.metric("Diferença", "—")
     st.write("")
-    detalhe = (
+
+    detalhe_real = (
         veiculos[veiculos["placa"] == placa]
         .groupby("categoria", as_index=False)["valor"].sum()
-        .sort_values("valor", ascending=False)
+        .rename(columns={"valor": "gasto_real"})
     )
-    for _, d in detalhe.iterrows():
-        c1, c2 = st.columns([3, 2])
-        c1.write(d["categoria"])
-        c2.write(f"R$ {d['valor']:,.2f}")
+    detalhe_orc = (
+        orc_placa.groupby("categoria", as_index=False)["valor"].sum().rename(columns={"valor": "orcado"})
+        if not orc_placa.empty else pd.DataFrame(columns=["categoria", "orcado"])
+    )
+    comparativo = pd.merge(detalhe_real, detalhe_orc, on="categoria", how="outer").fillna(0)
+    comparativo = comparativo.sort_values("gasto_real", ascending=False)
+
+    if not comparativo.empty:
+        st.markdown("**Por categoria**")
+        for _, c in comparativo.iterrows():
+            col_nome, col_orc, col_real = st.columns([2, 2, 2])
+            col_nome.write(c["categoria"])
+            col_orc.caption(f"Orçado: R$ {c['orcado']:,.2f}")
+            excedeu = c["orcado"] > 0 and c["gasto_real"] > c["orcado"]
+            marcador = " 🔺" if excedeu else ""
+            col_real.write(f"Real: R$ {c['gasto_real']:,.2f}{marcador}")
+        st.write("")
+
+    st.divider()
+    st.markdown("**Itens orçados**")
+    if orc_placa.empty:
+        st.caption("Nenhum item orçado lançado ainda.")
+    else:
+        for _, o in orc_placa.sort_values("criado_em", ascending=False).iterrows():
+            col_cat, col_valor, col_del = st.columns([2, 3, 1])
+            col_cat.write(o["categoria"])
+            texto_valor = f"R$ {o['valor']:,.2f}"
+            if o.get("observacao"):
+                texto_valor += f" — {o['observacao']}"
+            col_valor.write(texto_valor)
+            if col_del.button("🗑️", key=f"del_orc_{o['id']}"):
+                prep_delete_orcamento(o["id"])
+                st.cache_data.clear()
+                st.rerun()
+
     st.write("")
-    if st.button("Fechar", use_container_width=True):
+    st.markdown("**Lançar item orçado**")
+    categoria_orc = categoria_picker(fornecedores, f"orc_{placa}")
+    valor_orc = st.number_input("Valor orçado (R$)", min_value=0.0, step=50.0, key=f"valor_orc_{placa}")
+    obs_orc = st.text_input("Observação (opcional)", key=f"obs_orc_{placa}", placeholder="Ex: troca de para-choque")
+    if st.button("➕ Adicionar", key=f"add_orc_{placa}", use_container_width=True):
+        if not categoria_orc or valor_orc <= 0:
+            st.error("Escolha uma categoria e informe um valor maior que zero.")
+        else:
+            prep_insert_orcamento(placa, categoria_orc, valor_orc, obs_orc)
+            st.cache_data.clear()
+            st.rerun()
+
+    st.write("")
+    if st.button("Fechar", use_container_width=True, key=f"fechar_{placa}"):
         st.rerun()
 
 
@@ -247,11 +351,14 @@ def dialog_editar_fornecedor(fornecedores: pd.DataFrame, row: pd.Series):
 st.set_page_config(page_title="Preparação — Custos", layout="wide", page_icon="🔧")
 st.title("🔧 Preparação e Pós-Venda — Custos")
 
-tab_dashboard, tab_veiculos, tab_fornecedores = st.tabs(["📊 Painel de custos", "🚗 Por veículo", "🏷️ Fornecedores"])
+tab_dashboard, tab_comparativo, tab_veiculos, tab_fornecedores = st.tabs(
+    ["📊 Painel de custos", "📅 Comparar meses", "🚗 Por veículo", "🏷️ Fornecedores"]
+)
 
 with st.spinner("Carregando dados..."):
     solicitacoes = hub_fetch_solicitacoes()
     fornecedores = prep_fetch_fornecedores()
+    orcamentos = prep_fetch_orcamentos()
 
 if not fornecedores.empty:
     cat_map = dict(zip(fornecedores["cnpj_norm"], fornecedores["categoria"]))
@@ -287,8 +394,14 @@ if not solicitacoes.empty:
         & (solicitacoes["created_at"].dt.date >= start_date)
         & (solicitacoes["created_at"].dt.date <= end_date)
     ].copy()
+
+    base_meses = solicitacoes[
+        solicitacoes["empresa"].isin(empresa_sel) & solicitacoes["status"].isin(status_sel)
+    ].copy()
+    base_meses["ano_mes"] = base_meses["created_at"].dt.to_period("M")
 else:
     df = solicitacoes
+    base_meses = solicitacoes
 
 with tab_dashboard:
     if solicitacoes.empty:
@@ -359,6 +472,55 @@ with tab_dashboard:
                     })
                     st.dataframe(pendentes.style.format({"Total (R$)": "R$ {:,.2f}"}), use_container_width=True, hide_index=True)
 
+with tab_comparativo:
+    if solicitacoes.empty:
+        st.info("Nenhum registro de MANUTENCAO/POS_VENDAS encontrado no hub.")
+    else:
+        meses_disponiveis = sorted(base_meses["ano_mes"].unique(), reverse=True)
+        if len(meses_disponiveis) < 2:
+            st.warning("Ainda não há dados de pelo menos 2 meses diferentes para comparar.")
+        else:
+            opcoes_mes = {label_mes(p): p for p in meses_disponiveis}
+            labels = list(opcoes_mes.keys())
+            col_a, col_b = st.columns(2)
+            label_a = col_a.selectbox("Mês A", labels, index=min(1, len(labels) - 1))
+            label_b = col_b.selectbox("Mês B", labels, index=0)
+            periodo_a, periodo_b = opcoes_mes[label_a], opcoes_mes[label_b]
+
+            gasto_a = base_meses[base_meses["ano_mes"] == periodo_a].groupby("categoria")["valor"].sum()
+            gasto_b = base_meses[base_meses["ano_mes"] == periodo_b].groupby("categoria")["valor"].sum()
+            comparativo = pd.DataFrame({"a": gasto_a, "b": gasto_b}).fillna(0).reset_index()
+            comparativo["variacao"] = comparativo["b"] - comparativo["a"]
+            comparativo["variacao_pct"] = comparativo.apply(
+                lambda r: (r["variacao"] / r["a"] * 100) if r["a"] else (100.0 if r["b"] else 0.0), axis=1
+            )
+            comparativo = comparativo.sort_values("b", ascending=False)
+
+            total_a, total_b = comparativo["a"].sum(), comparativo["b"].sum()
+            c1, c2, c3 = st.columns(3)
+            c1.metric(label_a, f"R$ {total_a:,.2f}")
+            c2.metric(label_b, f"R$ {total_b:,.2f}")
+            variacao_total = total_b - total_a
+            pct_total = (variacao_total / total_a * 100) if total_a else 0
+            c3.metric("Variação", f"R$ {variacao_total:,.2f}", f"{pct_total:+.0f}%")
+
+            st.write("")
+            st.subheader("Por categoria")
+            maior_valor = comparativo[["a", "b"]].max().max()
+            for _, cat in comparativo.iterrows():
+                with st.container(border=True):
+                    st.markdown(f"**{cat['categoria']}**")
+                    c_label, c_barra, c_valor = st.columns([1, 3, 2])
+                    c_label.caption(label_a)
+                    c_barra.progress(cat["a"] / maior_valor if maior_valor else 0)
+                    c_valor.write(f"R$ {cat['a']:,.2f}")
+                    c_label, c_barra, c_valor = st.columns([1, 3, 2])
+                    c_label.caption(label_b)
+                    c_barra.progress(cat["b"] / maior_valor if maior_valor else 0)
+                    c_valor.write(f"R$ {cat['b']:,.2f}")
+                    seta = "🔺" if cat["variacao"] > 0 else ("🔻" if cat["variacao"] < 0 else "➖")
+                    st.caption(f"{seta} {cat['variacao_pct']:+.0f}% (R$ {cat['variacao']:,.2f})")
+
 with tab_veiculos:
     if solicitacoes.empty or df.empty:
         st.info("Nenhum registro para mostrar.")
@@ -393,7 +555,7 @@ with tab_veiculos:
                     c1.markdown(f"**🚗 {v['placa']}**")
                     c2.markdown(f"**R$ {v['valor']:,.2f}**")
                     if c3.button("Ver", key=f"ver_{v['placa']}", use_container_width=True):
-                        dialog_detalhe_veiculo(veiculos, v["placa"], v["valor"])
+                        dialog_detalhe_veiculo(veiculos, fornecedores, orcamentos, v["placa"], v["valor"])
 
 with tab_fornecedores:
     col_titulo, col_busca, col_novo = st.columns([2, 3, 2])
