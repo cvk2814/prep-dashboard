@@ -487,6 +487,12 @@ with tab_comparativo:
             label_b = col_b.selectbox("Mês B", labels, index=0)
             periodo_a, periodo_b = opcoes_mes[label_a], opcoes_mes[label_b]
 
+            categorias_disponiveis = sorted(base_meses["categoria"].dropna().unique().tolist())
+            categoria_filtro = st.multiselect(
+                "Categoria", categorias_disponiveis,
+                placeholder="Todas as categorias (deixe em branco pra ver tudo)",
+            )
+
             gasto_a = base_meses[base_meses["ano_mes"] == periodo_a].groupby("categoria")["valor"].sum()
             gasto_b = base_meses[base_meses["ano_mes"] == periodo_b].groupby("categoria")["valor"].sum()
             comparativo = pd.DataFrame({"a": gasto_a, "b": gasto_b}).fillna(0).reset_index()
@@ -494,32 +500,37 @@ with tab_comparativo:
             comparativo["variacao_pct"] = comparativo.apply(
                 lambda r: (r["variacao"] / r["a"] * 100) if r["a"] else (100.0 if r["b"] else 0.0), axis=1
             )
+            if categoria_filtro:
+                comparativo = comparativo[comparativo["categoria"].isin(categoria_filtro)]
             comparativo = comparativo.sort_values("b", ascending=False)
 
-            total_a, total_b = comparativo["a"].sum(), comparativo["b"].sum()
-            c1, c2, c3 = st.columns(3)
-            c1.metric(label_a, f"R$ {total_a:,.2f}")
-            c2.metric(label_b, f"R$ {total_b:,.2f}")
-            variacao_total = total_b - total_a
-            pct_total = (variacao_total / total_a * 100) if total_a else 0
-            c3.metric("Variação", f"R$ {variacao_total:,.2f}", f"{pct_total:+.0f}%")
+            if comparativo.empty:
+                st.warning("Nenhum gasto nessa(s) categoria(s) em nenhum dos dois meses selecionados.")
+            else:
+                total_a, total_b = comparativo["a"].sum(), comparativo["b"].sum()
+                c1, c2, c3 = st.columns(3)
+                c1.metric(label_a, f"R$ {total_a:,.2f}")
+                c2.metric(label_b, f"R$ {total_b:,.2f}")
+                variacao_total = total_b - total_a
+                pct_total = (variacao_total / total_a * 100) if total_a else 0
+                c3.metric("Variação", f"R$ {variacao_total:,.2f}", f"{pct_total:+.0f}%")
 
-            st.write("")
-            st.subheader("Por categoria")
-            maior_valor = comparativo[["a", "b"]].max().max()
-            for _, cat in comparativo.iterrows():
-                with st.container(border=True):
-                    st.markdown(f"**{cat['categoria']}**")
-                    c_label, c_barra, c_valor = st.columns([1, 3, 2])
-                    c_label.caption(label_a)
-                    c_barra.progress(cat["a"] / maior_valor if maior_valor else 0)
-                    c_valor.write(f"R$ {cat['a']:,.2f}")
-                    c_label, c_barra, c_valor = st.columns([1, 3, 2])
-                    c_label.caption(label_b)
-                    c_barra.progress(cat["b"] / maior_valor if maior_valor else 0)
-                    c_valor.write(f"R$ {cat['b']:,.2f}")
-                    seta = "🔺" if cat["variacao"] > 0 else ("🔻" if cat["variacao"] < 0 else "➖")
-                    st.caption(f"{seta} {cat['variacao_pct']:+.0f}% (R$ {cat['variacao']:,.2f})")
+                st.write("")
+                st.subheader("Por categoria")
+                maior_valor = comparativo[["a", "b"]].max().max()
+                for _, cat in comparativo.iterrows():
+                    with st.container(border=True):
+                        st.markdown(f"**{cat['categoria']}**")
+                        c_label, c_barra, c_valor = st.columns([1, 3, 2])
+                        c_label.caption(label_a)
+                        c_barra.progress(cat["a"] / maior_valor if maior_valor else 0)
+                        c_valor.write(f"R$ {cat['a']:,.2f}")
+                        c_label, c_barra, c_valor = st.columns([1, 3, 2])
+                        c_label.caption(label_b)
+                        c_barra.progress(cat["b"] / maior_valor if maior_valor else 0)
+                        c_valor.write(f"R$ {cat['b']:,.2f}")
+                        seta = "🔺" if cat["variacao"] > 0 else ("🔻" if cat["variacao"] < 0 else "➖")
+                        st.caption(f"{seta} {cat['variacao_pct']:+.0f}% (R$ {cat['variacao']:,.2f})")
 
 with tab_veiculos:
     if solicitacoes.empty or df.empty:
